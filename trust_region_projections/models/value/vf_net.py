@@ -1,65 +1,58 @@
-#   Copyright (c) 2021 Robert Bosch GmbH
-#   Author: Fabian Otto
-#
-#   This program is free software: you can redistribute it and/or modify
-#   it under the terms of the GNU Affero General Public License as published
-#   by the Free Software Foundation, either version 3 of the License, or
-#   (at your option) any later version.
-#
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU Affero General Public License for more details.
-#
-#   You should have received a copy of the GNU Affero General Public License
-#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-from typing import Sequence
-
 import torch.nn as nn
 
 from trust_region_projections.utils.network_utils import get_activation, get_mlp, initialize_weights
 
 
 class VFNet(nn.Module):
+    """
+    An example value network, with support for arbitrarily many
+    fully connected hidden layers (by default 2 * 64-neuron layers),
+    maps a state of size (state_dim) -> a scalar value.
+    """
 
-    def __init__(self, obs_dim: int, output_dim: int = 1, init: str = "orthogonal",
-                 hidden_sizes: Sequence[int] = (64, 64), activation: str = "tanh"):
+    def __init__(self, input_dim, output_dim=1, init="orthogonal", hidden_sizes=(64, 64), activation: str = "tanh",
+                 layer_norm: bool = False):
         """
-        A value network using a fully connected neural network.
+        Initializes the value network.
         Args:
-            obs_dim: Observation dimensionality aka input dimensionality
-            output_dim: Action dimensionality aka output dimensionality, generally this is 1
-            init: Initialization of layers
-            hidden_sizes: Sequence of hidden layer sizes for each hidden layer in the neural network.
-            activation: Type of ctivation for hidden layers
-
-        Returns:
+            input_dim: the input dimension of the network (i.e dimension of state)
+            output_dim: number of output nodes
+            init: initialization of layers
+            hidden_sizes: an iterable of integers, each of which represents the size
+                    of a hidden layer in the neural network.
+            activation: activation of hidden layers
+            layer_norm: use layer normalization with tanh after first layer
+        Returns: Initialized Value network
 
         """
+        """
 
+        """
         super().__init__()
-        self.activation = get_activation(activation)
-        self._affine_layers = get_mlp(obs_dim, hidden_sizes, init, True)
+        # self.activation = get_activation(activation)
+        self._affine_layers = get_mlp(input_dim, hidden_sizes, init, activation, layer_norm, True)
 
         self.final = self.get_final(hidden_sizes[-1], output_dim, init)
 
-    def get_final(self, prev_size, output_dim, init):
+    def get_final(self, prev_size, output_dim, init, gain=1.0, scale=1e-4):
         final = nn.Linear(prev_size, output_dim)
         initialize_weights(final, init, scale=1.0)
         return final
 
     def forward(self, x, train=True):
         """
-        Forward pass of the value network
-        Args:
-            x: States to compute the value estimate for.
+        Performs inference using the value network.
+        Inputs:
+        - x, the state passed in from the agent
         Returns:
-            The value of the states x
+        - The scalar (float) value of that state, as estimated by the net
         """
 
         self.train(train)
 
         for affine in self._affine_layers:
-            x = self.activation(affine(x))
+            x = affine(x)
         return self.final(x).squeeze(-1)
+
+    def get_value(self, x):
+        return self(x)

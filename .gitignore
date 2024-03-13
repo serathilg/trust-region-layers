@@ -107,16 +107,12 @@ venv.bak/
 .DS_Store
 /.idea
 
-# config files
+#configs
 /configs/db.cfg
+terminate.info.*
+configs/run_config/agent_configs
 
-# saved results
-/results
-
-#cpp stuff
-*/build
-*/cmake-build-debug
-*/*egg-info
-*/dist
-*/pybind11
-*/.idea
+#temp files
+wandb**
+cw2_result
+results

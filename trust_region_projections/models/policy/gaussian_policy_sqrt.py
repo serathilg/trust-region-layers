@@ -1,19 +1,3 @@
-#   Copyright (c) 2021 Robert Bosch GmbH
-#   Author: Fabian Otto
-#
-#   This program is free software: you can redistribute it and/or modify
-#   it under the terms of the GNU Affero General Public License as published
-#   by the Free Software Foundation, either version 3 of the License, or
-#   (at your option) any later version.
-#
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU Affero General Public License for more details.
-#
-#   You should have received a copy of the GNU Affero General Public License
-#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 import torch as ch
 import torch.nn as nn
 
@@ -23,20 +7,23 @@ from trust_region_projections.models.value.vf_net import VFNet
 
 class GaussianPolicySqrt(GaussianPolicyFull):
     """
-    A Gaussian policy using a fully connected neural network.
-    The parameterizing tensor is a mean vector and the true matrix square root of the standard deviation.
+    A continuous policy using a fully connected neural network.
+    The parameterizing tensor is a mean and a cholesky matrix, which parameterize a full gaussian distribution.
     """
 
     def __init__(self, obs_dim, action_dim, init, hidden_sizes=(64, 64), activation: str = "tanh",
-                 contextual_std: bool = False, init_std: float = 1., minimal_std: float = 1e-5, share_weights=False,
-                 vf_model: VFNet = None):
-        super().__init__(obs_dim, action_dim, init, hidden_sizes, activation, contextual_std, init_std, minimal_std,
-                         share_weights, vf_model)
+                 layer_norm: bool = False, contextual_std: bool = False, trainable_std: bool = True,
+                 init_std: float = 1., share_weights=False, vf_model: VFNet = None, minimal_std=1e-5,
+                 scale: float = 1e-4, gain: float = 0.01):
+        super().__init__(obs_dim, action_dim, init, hidden_sizes, activation, layer_norm, contextual_std, trainable_std,
+                         init_std=init_std, share_weights=share_weights, vf_model=vf_model, minimal_std=minimal_std,
+                         scale=scale, gain=gain)
+
         self.diag_activation = nn.Softplus()
 
     def forward(self, x: ch.Tensor, train: bool = True):
         mean, chol = super(GaussianPolicySqrt, self).forward(x, train)
-        sqrt = chol @ chol.permute(0, 2, 1)
+        sqrt = chol @ chol.transpose(-2, -1)
 
         return mean, sqrt
 
@@ -53,11 +40,11 @@ class GaussianPolicySqrt(GaussianPolicyFull):
 
     def maha(self, mean, mean_other, std):
         diff = (mean - mean_other)[..., None]
-        return (ch.solve(diff, std)[0] ** 2).sum([-2, -1])
+        return (ch.linalg.solve(std, diff) ** 2).sum([-2, -1])
 
     def precision(self, std):
         cov = self.covariance(std)
-        return ch.solve(ch.eye(cov.shape[-1], dtype=std.dtype, device=std.device), cov)[0]
+        return ch.linalg.solve(cov, ch.eye(cov.shape[-1], dtype=std.dtype, device=std.device))
 
     def covariance(self, std: ch.Tensor):
         return std @ std

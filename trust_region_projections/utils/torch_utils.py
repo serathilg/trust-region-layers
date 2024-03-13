@@ -1,21 +1,52 @@
-#   Copyright (c) 2021 Robert Bosch GmbH
-#   Author: Fabian Otto
-#
-#   This program is free software: you can redistribute it and/or modify
-#   it under the terms of the GNU Affero General Public License as published
-#   by the Free Software Foundation, either version 3 of the License, or
-#   (at your option) any later version.
-#
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU Affero General Public License for more details.
-#
-#   You should have received a copy of the GNU Affero General Public License
-#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+import logging
+import math
+import os
+from typing import Any
+import collections
 
 import numpy as np
 import torch as ch
+
+from utils.utils import get_free_gpus
+
+
+def sqrtm_newton(x: ch.Tensor, **kwargs: Any):
+    """
+    From: https://github.com/msubhransu/matrix-sqrt/blob/master/matrix_sqrt.py
+    License: MIT
+
+    Compute the Sqrt of a matrix based on Newton-Schulz algorithm
+    """
+    num_iters = kwargs.get("num_iters") or 10
+
+    batch_size = x.shape[0]
+    dim = x.shape[-1]
+    dtype = x.dtype
+
+    normA = x.pow(2).sum(dim=1).sum(dim=1).sqrt()
+    Y = x / normA.view(batch_size, 1, 1).expand_as(x)
+    I = 3.0 * ch.eye(dim, dtype=dtype)
+    Z = ch.eye(dim, dtype=dtype)
+    for i in range(num_iters):
+        T = 0.5 * (I - Z @ Y)
+        Y = Y @ T
+        Z = T @ Z
+    sA = Y * normA.sqrt().view(batch_size, 1, 1).expand_as(x)
+    return sA
+
+
+def sqrtm(x: ch.Tensor):
+    """
+    Compute the Sqrt of a matrix based on eigen decomposition. Assumes the matrix is symmetric PSD.
+
+    Args:
+        x: data
+
+    Returns:
+        matrix sqrt of x
+    """
+    eigvals, eigvecs = x.symeig(eigenvectors=True, upper=False)
+    return eigvecs @ (ch.sqrt(eigvals)).diag_embed(0, -2, -1) @ eigvecs.permute(0, 2, 1)
 
 
 def torch_batched_trace(x) -> ch.Tensor:
@@ -30,17 +61,22 @@ def torch_batched_trace(x) -> ch.Tensor:
     return ch.diagonal(x, dim1=-2, dim2=-1).sum(-1)
 
 
-def tensorize(x, cpu=True, dtype=ch.float32):
+def torch_batched_trace_square(x):
     """
-    Utility function for turning arrays into tensors
+    Compute trace in n,m of squared batched matrix XX^{T}
     Args:
-        x: data
-        cpu: Whether to generate a CPU or GPU tensor
-        dtype: dtype of tensor
+        x: matrix with shape [a,..., l, n, m]
 
-    Returns:
-        gpu/cpu tensor of x with specified dtype
+    Returns: trace with shape [a,...l]
+
     """
+    n = x.size(-1)
+    m = x.size(-2)
+    flat_trace = x.reshape(-1, m * n).square().sum(-1)
+    return flat_trace.reshape(x.shape[:-2])
+
+
+def tensorize(x, cpu=True, dtype=ch.float32):
     return cpu_tensorize(x, dtype) if cpu else gpu_tensorize(x, dtype)
 
 
@@ -52,10 +88,9 @@ def gpu_tensorize(x, dtype=None):
         dtype: dtype to generate
 
     Returns:
-        gpu tensor of x
+        gpu tensor version of x
     """
-    dtype = dtype if dtype else x.dtype
-    return ch.tensor(x).type(dtype).cuda()
+    return cpu_tensorize(x, dtype).cuda()
 
 
 def cpu_tensorize(x, dtype=None):
@@ -66,10 +101,12 @@ def cpu_tensorize(x, dtype=None):
         dtype: dtype to generate
 
     Returns:
-        cpu tensor of x
+        cpu tensor version of x
     """
     dtype = dtype if dtype else x.dtype
-    return ch.tensor(x).type(dtype)
+    if not isinstance(x, ch.Tensor):
+        x = ch.tensor(x)
+    return x.type(dtype)
 
 
 def to_gpu(x):
@@ -79,7 +116,7 @@ def to_gpu(x):
         x: data
 
     Returns:
-        gpu tensor of x
+        gpu tensor version of x
     """
     return x.cuda()
 
@@ -91,7 +128,7 @@ def get_numpy(x):
         x: torch.Tensor
 
     Returns:
-        numpy tensor of x
+        numpy tensor version of x
 
     """
     return x.cpu().detach().numpy()
@@ -104,7 +141,7 @@ def flatten_batch(x):
         x: tensor to flatten
 
     Returns:
-        flattend tensor of x
+        flattend tensor version of x
     """
 
     s = x.shape
@@ -126,7 +163,7 @@ def select_batch(index, *args) -> list:
 
 def generate_minibatches(n, n_minibatches):
     """
-    Generate n_minibatches sets of indices for N data points.  
+    Generate n_minibatches sets of indices for N data points.
     Args:
         n: total number of data points
         n_minibatches: how many minibatches to generate
@@ -141,10 +178,8 @@ def generate_minibatches(n, n_minibatches):
 
 def fill_triangular(x, upper=False):
     """
-    The following function is derived from TensorFlow Probability
-    https://github.com/tensorflow/probability/blob/master/tensorflow_probability/python/math/linalg.py#L784
-    Copyright (c) 2018 The TensorFlow Probability Authors, licensed under the Apache-2.0 license,
-    cf. 3rd-party-licenses.txt file in the root directory of this source tree.
+    From: https://github.com/tensorflow/probability/blob/c833ee5cd9f60f3257366b25447b9e50210b0590/tensorflow_probability/python/math/linalg.py#L787
+    License: Apache-2.0
 
     Creates a (batch of) triangular matrix from a vector of inputs.
 
@@ -254,10 +289,8 @@ def fill_triangular(x, upper=False):
 
 def fill_triangular_inverse(x, upper=False):
     """
-    The following function is derived from TensorFlow Probability
-    https://github.com/tensorflow/probability/blob/master/tensorflow_probability/python/math/linalg.py#L934
-    Copyright (c) 2018 The TensorFlow Probability Authors, licensed under the Apache-2.0 license,
-    cf. 3rd-party-licenses.txt file in the root directory of this source tree.
+    From: https://github.com/tensorflow/probability/blob/c833ee5cd9f60f3257366b25447b9e50210b0590/tensorflow_probability/python/math/linalg.py#L937
+    License: Apache-2.0
 
     Creates a vector from a (batch of) triangular matrix.
 
@@ -319,7 +352,7 @@ def diag_bijector(f: callable, x):
     """
     Apply transformation f(x) on the diagonal of a batched matrix.
     Args:
-        f: callable to apply
+        f: callable to apply to diagonal
         x: data
 
     Returns:
@@ -340,7 +373,7 @@ def inverse_softplus(x):
     return (x.exp() - 1.).log()
 
 
-def torch_atleast_2d(x, reverse=False):
+def torch_atleast_2d(x: ch.Tensor, reverse=False):
     """
     Transforms torch tensor to a torch tensor with at least a 2D shape.
     Args:
@@ -350,10 +383,117 @@ def torch_atleast_2d(x, reverse=False):
     Returns:
         2D torch tensor or input, when already larger than 2D
     """
-    if len(x.shape) == 0:
+    if x.dim() == 0:
         result = x.reshape([1, 1])
-    elif len(x.shape) == 1:
+    elif x.dim() == 1:
         result = x[:, None] if reverse else x[None, :]
     else:
         result = x
     return result
+
+
+def torch_atleast_3d(x: ch.Tensor, reverse=False):
+    """
+    Transforms torch tensor to a torch tensor with at least a 3D shape.
+    Args:
+        x: data
+        reverse: For 1D input only -> if True: x[:, None] else: x[None, :]
+
+    Returns:
+        2D torch tensor or input, when already larger than 2D
+    """
+    if x.dim() == 0:
+        result = x.reshape(1, 1, 1)
+    elif x.dim() == 1:
+        result = x[:, None, None] if reverse else x[None, None, :]
+    elif x.dim() == 2:
+        result = x[:, :, None] if reverse else x[None, :, :]
+    else:
+        result = x
+    return result
+
+
+def log1pexp(x: ch.Tensor):
+    """
+    Computes log(1 + exp(x)), which is e.g. used to add log probabilities.
+    For details of the computation check here:
+    https://cran.r-project.org/web/packages/Rmpfr/vignettes/log1mexp-note.pdf
+    Args:
+        x: probability in log-space
+    """
+    out = ch.zeros_like(x)
+    mask_1 = x.le(-37)
+    mask_2 = ~mask_1 * x.le(18)
+    mask_3 = ~mask_1 * ~mask_2 * x.le(33.3)
+    mask_4 = ~mask_1 * ~mask_2 * ~mask_3
+
+    out[mask_1] = x[mask_1].exp()
+    out[mask_2] = x[mask_2].exp().log1p()
+    out[mask_3] = x[mask_3] + (-x[mask_3]).exp()
+    out[mask_4] = x[mask_4]
+
+    return out
+
+
+def log1mexp(x: ch.Tensor):
+    """
+    Computes log(1 - exp(x)), which is e.g. used to subtract log probabilities.
+    For details of the computation check here:
+    https://cran.r-project.org/web/packages/Rmpfr/vignettes/log1mexp-note.pdf
+    Args:
+        x: probability in log-space
+    """
+    return ch.where(x <= math.log(2), ch.log(-ch.expm1(x)), ch.log1p(-ch.exp(x)))
+    # dtype_max = ch.finfo(x.dtype).max
+    # return 0 if x > dtype_max else (1 - x.exp()).log()
+
+
+def logaddexp(input: ch.Tensor, other: ch.Tensor):
+    """
+    Add two log values. Naively this could be done as log(exp(input) + exp(other)).
+    This version, however, is numerically more stable
+    Args:
+        input: first probability in log-space
+        other: second probability in log-space
+    """
+    max_val = ch.maximum(input, other)
+    return max_val + log1pexp(-ch.abs(input - other))
+
+
+def logsubexp(input: ch.Tensor, other: ch.Tensor):
+    """
+    Subtract two log values. Naively this could be dones as log(exp(input) - exp(other)).
+    This version, however, is numerically more stable
+    Args:
+        input: first probability in log-space
+        other: second probability in log-space
+    """
+    assert (input < other).all(), "Cannot subtract larger number from smaller one in log space, log is not defined"
+    return input + log1mexp(other - input)
+
+
+def get_stats_dict(d: dict):
+    def get_stats(x, name):
+        return {
+            f'{name}_mean': x.mean(),
+            f'{name}_std': x.std(),
+            f'{name}_max': x.max(),
+            f'{name}_min': x.min(),
+        }
+
+    out = collections.OrderedDict()
+    for k, v in d.items():
+        out.update(get_stats(v, k))
+    return out
+
+
+def try_set_gpu_device(params: dict):
+    if not params['cpu']:
+        avail_gpus = get_free_gpus()[0]
+        if avail_gpus:
+            ch.cuda.set_device(avail_gpus)
+            logging.info(f"Currently used GPUs: {ch.cuda.current_device()}")
+        else:
+            logging.warning("No GPU available, running on CPU.")
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            params['cpu'] = True

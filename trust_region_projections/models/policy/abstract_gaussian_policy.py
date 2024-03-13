@@ -1,21 +1,5 @@
-#   Copyright (c) 2021 Robert Bosch GmbH
-#   Author: Fabian Otto
-#
-#   This program is free software: you can redistribute it and/or modify
-#   it under the terms of the GNU Affero General Public License as published
-#   by the Free Software Foundation, either version 3 of the License, or
-#   (at your option) any later version.
-#
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU Affero General Public License for more details.
-#
-#   You should have received a copy of the GNU Affero General Public License
-#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 from abc import ABC, abstractmethod
-from typing import Sequence, Tuple
+from typing import Tuple, Union
 
 import torch as ch
 import torch.nn as nn
@@ -26,37 +10,18 @@ from trust_region_projections.utils.torch_utils import inverse_softplus
 
 
 class AbstractGaussianPolicy(nn.Module, ABC):
-
-    def __init__(self, obs_dim: int, action_dim: int, init: str = "orthogonal", hidden_sizes: Sequence[int] = (64, 64),
-                 activation: str = "tanh", contextual_std: bool = False, init_std: float = 1.,
-                 minimal_std: float = 1e-5, share_weights: bool = False, vf_model: VFNet = None):
-        """
-        Abstract Method defining a Gaussian policy structure.
-        Args:
-            obs_dim: Observation dimensionality aka input dimensionality
-            action_dim: Action dimensionality aka output dimensionality
-            init: Initialization type for the layers 
-            hidden_sizes: Sequence of hidden layer sizes for each hidden layer in the neural network.
-            activation: Type of ctivation for hidden layers
-            contextual_std: Whether to use a contextual standard deviation or not
-            init_std: initial value of the standard deviation matrix
-            minimal_std: minimal standard deviation
-            share_weights: Use joint value and policy network
-            vf_model: Optional model when training value and policy model jointly.
-
-        Returns:
-
-        """
+    def __init__(self, obs_dim, action_dim, init, hidden_sizes=(64, 64), activation: str = "tanh",
+                 layer_norm: bool = False, contextual_std: bool = False, trainable_std: bool = True,
+                 init_std: float = 1., share_weights=False, vf_model: VFNet = None, minimal_std: float = 1e-5,
+                 scale: float = 1e-4, gain: float = 0.01):
         super().__init__()
-
-        self.activation = get_activation(activation)
         self.action_dim = action_dim
         self.contextual_std = contextual_std
         self.share_weights = share_weights
-        self.minimal_std = minimal_std
+        self.minimal_std = ch.tensor(minimal_std)
         self.init_std = ch.tensor(init_std)
 
-        self._affine_layers = get_mlp(obs_dim, hidden_sizes, init, True)
+        self._affine_layers = get_mlp(obs_dim, hidden_sizes, init, activation, layer_norm, True)
 
         prev_size = hidden_sizes[-1]
 
@@ -65,21 +30,25 @@ class AbstractGaussianPolicy(nn.Module, ABC):
 
         # This shift is applied to the Parameter/cov NN output before applying the transformation
         # and gives hence the wanted initial cov
-        self._pre_activation_shift = self._get_preactivation_shift(self.init_std, minimal_std)
-        self._mean = self._get_mean(action_dim, prev_size, init)
-        self._pre_std = self._get_std(contextual_std, action_dim, prev_size, init)
+        self._pre_activation_shift = self._get_preactivation_shift(self.init_std, self.minimal_std)
+        self._mean = self._get_mean(action_dim, prev_size, init, gain, scale)
+        self._pre_std = self._get_std(contextual_std, action_dim, prev_size, init, gain, scale)
+        if not trainable_std:
+            assert not self.contextual_std, "Cannot freeze std while using a contextual std."
+            self._pre_std.requires_grad_(False)
 
         self.vf_model = vf_model
 
         if share_weights:
             self.final_value = nn.Linear(prev_size, 1)
-            initialize_weights(self.final_value, init, scale=1.0)
+            initialize_weights(self.final_value, init, gain=1.0)
 
     @abstractmethod
     def forward(self, x, train=True):
         pass
 
     def get_value(self, x, train=True):
+
         if self.share_weights:
             self.train(train)
             for affine in self.affine_layers:
@@ -93,16 +62,9 @@ class AbstractGaussianPolicy(nn.Module, ABC):
         return value
 
     def squash(self, x):
-        """
-        Post sampling transformation
-        Args: 
-            x: values to transform 
-        Returns: 
-            transformed value
-        """
         return x
 
-    def _get_mean(self, action_dim, prev_size=None, init=None, scale=0.01):
+    def _get_mean(self, action_dim, prev_size=None, init=None, gain=0.01, scale=1e-4):
         """
         Constructor method for mean prediction.
         Args:
@@ -112,14 +74,15 @@ class AbstractGaussianPolicy(nn.Module, ABC):
             scale
 
         Returns:
-            Mean parametrization.
+
         """
         mean = nn.Linear(prev_size, action_dim)
-        initialize_weights(mean, init, scale=scale)
+        initialize_weights(mean, init, gain=gain, scale=scale)
         return mean
 
     # @final
-    def _get_std(self, contextual_std: bool, action_dim, prev_size=None, init=None):
+    def _get_std(self, contextual_std: bool, action_dim, prev_size=None, init=None, gain=0.01, scale=1e-4) -> Union[
+        nn.Parameter, nn.Module]:
         """
         Constructor method for std prediction. Do not overwrite.
         Args:
@@ -129,10 +92,10 @@ class AbstractGaussianPolicy(nn.Module, ABC):
             init: initialization type of layer.
 
         Returns:
-            Standard deviation parametrization.
+
         """
         if contextual_std:
-            return self._get_std_layer(prev_size, action_dim, init)
+            return self._get_std_layer(prev_size, action_dim, init, gain, scale)
         else:
             return self._get_std_parameter(action_dim)
 
@@ -140,65 +103,67 @@ class AbstractGaussianPolicy(nn.Module, ABC):
         """
         Compute the prediction shift to enforce an initial covariance value for contextual and non contextual policies.
         Args:
-            init_std: value to initialize the covariance output with.
+            init_std: value to initalize the covariance output with.
             minimal_std: lower bound on the covariance.
 
         Returns:
-            Preactivation shift to enforce minimal and initial covariance.
+            preactivation shift to enforce minimal and initial covariance.
         """
         return self.diag_activation_inv(init_std - minimal_std)
 
     @abstractmethod
-    def _get_std_parameter(self, action_dim):
+    def _get_std_parameter(self, action_dim) -> nn.Parameter:
         """
-        Creates a trainable variable for predicting the std for a non contextual policy.
+        Creates a trainiable variable for predicting the std for a non contextual policy.
         Args:
-            action_dim: Action dimension for output shape
+            action_dim: action dimension for output shape
 
         Returns:
-            Torch trainable variable for covariance prediction.
+            torch trainable variable for covariance prediction.
         """
         pass
 
     @abstractmethod
-    def _get_std_layer(self, prev_size, action_dim, init):
+    def _get_std_layer(self, prev_size, action_dim, init, gain=0.01, scale=1e-4) -> nn.Module:
         """
         Creates a layer for predicting the std for a contextual policy.
         Args:
-            prev_size: Previous layer's output size
-            action_dim: Action dimension for output shape
-            init: Initialization type of layer.
+            gain:
+            scale:
+            prev_size: previous layer's output size
+            action_dim: action dimension for output shape
+            init: initialization type of layer.
 
         Returns:
-            Torch layer for covariance prediction.
+            torch layer for covariance prediction.
         """
         pass
 
     @abstractmethod
     def sample(self, p: Tuple[ch.Tensor, ch.Tensor], n=1) -> ch.Tensor:
         """
-        Given prob dist p=(mean, var), generate samples WITHOUT reparametrization trick
+        Given prob dist p=(mean, var),
          Args:
-            p: Tuple (means, var). means (batch_size, action_space), var (action_space,).
+            p: tuple (means, var). means (batch_size, action_space), var (action_space,).
                 p are batched probability distributions you're sampling from
-            n: Number of samples
+            n: number of samples
 
         Returns:
-            Actions sampled from p_i (batch_size, action_dim)
+            actions sampled from p_i (batch_size, action_dim)
         """
         pass
 
     @abstractmethod
     def rsample(self, p: Tuple[ch.Tensor, ch.Tensor], n=1) -> ch.Tensor:
         """
-        Given prob dist p=(mean, var), generate samples WITH reparametrization trick.
-        This version applies the reparametrization trick to allow for backpropagate through it.
+        Given prob dist p=(mean, var),
          Args:
-            p: Tuple (means, var). means (batch_size, action_space), var (action_space,).
+            p: tuple (means, var). means (batch_size, action_space), var (action_space,).
                 p are batched probability distributions you're sampling from
-            n: Number of samples
+                This version applies the reparametrization trick and allows to backpropagate through it.
+            n: number of samples
         Returns:
-            Actions sampled from p_i (batch_size, action_dim)
+            actions sampled from p_i (batch_size, action_dim)
         """
         pass
 
@@ -207,12 +172,12 @@ class AbstractGaussianPolicy(nn.Module, ABC):
         """
         Computes the log probability of x given a batched distributions p (mean, std)
         Args:
-            p: Tuple (means, var). means (batch_size, action_space), var (action_space,).
-            x: Values to compute logpacs for
+            p: tuple (means, var). means (batch_size, action_space), var (action_space,).
+            x:
             **kwargs:
 
         Returns:
-            Log probabilities of x.
+
         """
         pass
 
@@ -221,11 +186,6 @@ class AbstractGaussianPolicy(nn.Module, ABC):
         """
         Get entropies over the probability distributions given by p = (mean, var).
         mean shape (batch_size, action_space), var shape (action_space,)
-        Args: 
-            p: Tuple (means, var). means (batch_size, action_space), var (action_space,).
-            
-        Returns: 
-            Policy entropy based on sampled distributions p.
         """
         pass
 
@@ -250,7 +210,7 @@ class AbstractGaussianPolicy(nn.Module, ABC):
             std: scaling matrix
 
         Returns:
-            Mahalanobis distance between mean and mean_other
+            mahalanobis distance between mean and mean_other
         """
         pass
 
@@ -262,7 +222,7 @@ class AbstractGaussianPolicy(nn.Module, ABC):
             std: std matrix
 
         Returns:
-            Precision matrix
+            precision matrix
         """
         pass
 
@@ -271,7 +231,7 @@ class AbstractGaussianPolicy(nn.Module, ABC):
         """
         Compute the full covariance matrix given the std.
         Args:
-            std: std matrix
+            std:
 
         Returns:
 
@@ -281,8 +241,7 @@ class AbstractGaussianPolicy(nn.Module, ABC):
     @abstractmethod
     def set_std(self, std: ch.Tensor) -> None:
         """
-        For the NON-contextual case we do not need to regress the std, we can simply set it. 
-        This is a helper method to achieve this.
+        For the NON-contextual case we do not need to regress the std, we can simply set it
         Args:
             std: projected std
 
@@ -294,9 +253,7 @@ class AbstractGaussianPolicy(nn.Module, ABC):
     def get_last_layer(self):
         """
         Returns last layer of network. Only required for the PAPI projection.
-
         Returns:
-            Last layer weights for PAPI prpojection. 
 
         """
         return self._affine_layers[-1].weight.data
@@ -305,8 +262,8 @@ class AbstractGaussianPolicy(nn.Module, ABC):
         """
         Update the last layer alpha according to papi paper [Akrour et al., 2019]
         Args:
-            eta: Multiplier alpha from [Akrour et al., 2019]
-            A: Projected intermediate policy matrix
+            eta: alpha
+            A: intermediate policy alpha matrix
 
         Returns:
 
@@ -319,7 +276,7 @@ class AbstractGaussianPolicy(nn.Module, ABC):
         """
         Whether policy is returning a full sqrt matrix as std.
         Returns:
-        
+
         """
         return False
 

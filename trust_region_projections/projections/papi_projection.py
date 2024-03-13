@@ -1,19 +1,3 @@
-#   Copyright (c) 2021 Robert Bosch GmbH
-#   Author: Fabian Otto
-#
-#   This program is free software: you can redistribute it and/or modify
-#   it under the terms of the GNU Affero General Public License as published
-#   by the Free Software Foundation, either version 3 of the License, or
-#   (at your option) any later version.
-#
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU Affero General Public License for more details.
-#
-#   You should have received a copy of the GNU Affero General Public License
-#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 import logging
 
 import copy
@@ -35,33 +19,24 @@ class PAPIProjection(BaseProjectionLayer):
                  proj_type: str = "",
                  mean_bound: float = 0.015,
                  cov_bound: float = 0.0,
+                 trust_region_coeff: float = 0.0,
+                 scale_prec: bool = False,
 
+                 entropy_schedule: Union[None, str] = None,
+                 action_dim: Union[None, int] = None,
+                 total_train_steps: Union[None, int] = None,
+                 target_entropy: float = 0.0,
+                 temperature: float = 0.5,
                  entropy_eq: bool = False,
                  entropy_first: bool = True,
 
                  cpu: bool = True,
                  dtype: ch.dtype = ch.float32,
-                 **kwargs
                  ):
 
-        """
-        PAPI projection, which can be used after each training epoch to satisfy the trust regions.
-        Args:
-           proj_type: Which type of projection to use. None specifies no projection and uses the TRPO objective.
-           mean_bound: projection bound for the step size,
-                       PAPI only has a joint KL constraint, mean and cov bound are summed for this bound.
-           cov_bound: projection bound for the step size,
-                      PAPI only has a joint KL constraint, mean and cov bound are summed for this bound.
-           entropy_eq: Use entropy equality constraints.
-           entropy_first: Project entropy before trust region.
-           cpu: Compute on CPU only.
-           dtype: Data type to use, either of float32 or float64. The later might be necessary for higher
-                   dimensions in order to learn the full covariance.
-        """
-
         assert entropy_first
-        super().__init__(proj_type, mean_bound, cov_bound, 0.0, False, None, None, None, 0.0, 0.0, entropy_eq,
-                         entropy_first, cpu, dtype)
+        super().__init__(proj_type, mean_bound, cov_bound, trust_region_coeff, scale_prec, entropy_schedule, action_dim,
+                         total_train_steps, target_entropy, temperature, entropy_eq, entropy_first, cpu, dtype)
 
         self.last_policies = []
 
@@ -77,12 +52,12 @@ class PAPIProjection(BaseProjectionLayer):
         """
         runs papi projection layer and constructs sqrt of covariance
         Args:
+            **kwargs:
             policy: policy instance
             p: current distribution
             q: old distribution
             eps: (modified) kl bound/ kl bound for mean part
             eps_cov: (modified) kl bound for cov part
-            **kwargs:
 
         Returns:
             mean, cov sqrt
@@ -163,7 +138,7 @@ class PAPIProjection(BaseProjectionLayer):
         Args:
             policy: policy instance
             q: old distribution
-            obs: collected observations from trajectories
+            obs: collected observations from sampling
             lr_schedule: lr schedule for policy
             lr_schedule_vf: lr schedule for vf
 

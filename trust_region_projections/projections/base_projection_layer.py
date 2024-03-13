@@ -1,21 +1,7 @@
-#   Copyright (c) 2021 Robert Bosch GmbH
-#   Author: Fabian Otto
-#
-#   This program is free software: you can redistribute it and/or modify
-#   it under the terms of the GNU Affero General Public License as published
-#   by the Free Software Foundation, either version 3 of the License, or
-#   (at your option) any later version.
-#
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU Affero General Public License for more details.
-#
-#   You should have received a copy of the GNU Affero General Public License
-#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 import copy
 import math
+from collections import OrderedDict
+
 import torch as ch
 from typing import Tuple, Union
 
@@ -28,7 +14,7 @@ from trust_region_projections.utils.torch_utils import generate_minibatches, sel
 def entropy_inequality_projection(policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Tensor],
                                   beta: Union[float, ch.Tensor]):
     """
-    Projects std to satisfy an entropy INEQUALITY constraint.
+    projects std to satisfy an entropy INEQUALITY constraint.
     Args:
         policy: policy instance
         p: current distribution
@@ -58,7 +44,7 @@ def entropy_inequality_projection(policy: AbstractGaussianPolicy, p: Tuple[ch.Te
 def entropy_equality_projection(policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Tensor],
                                 beta: Union[float, ch.Tensor]):
     """
-    Projects std to satisfy an entropy EQUALITY constraint.
+    projects std to satisfy an entropy EQUALITY constraint.
     Args:
         policy: policy instance
         p: current distribution
@@ -78,7 +64,7 @@ def entropy_equality_projection(policy: AbstractGaussianPolicy, p: Tuple[ch.Tens
 
 def mean_projection(mean: ch.Tensor, old_mean: ch.Tensor, maha: ch.Tensor, eps: ch.Tensor):
     """
-    Projects the mean based on the Mahalanobis objective and trust region.
+    Projections the mean based on the Mahalanobis objective and trust region.
     Args:
         mean: current mean vectors
         old_mean: old mean vectors
@@ -108,40 +94,65 @@ def mean_projection(mean: ch.Tensor, old_mean: ch.Tensor, maha: ch.Tensor, eps: 
     return proj_mean
 
 
+def mean_equality_projection(mean: ch.Tensor, old_mean: ch.Tensor, maha: ch.Tensor, eps: ch.Tensor):
+    """
+    Projections the mean based on the Mahalanobis objective and trust region for an EQUALITY constraint.
+    Args:
+        mean: current mean vectors
+        old_mean: old mean vectors
+        maha: Mahalanobis distance between the two mean vectors
+        eps: trust region bound
+
+    Returns:
+        projected mean that satisfies the trust region
+    """
+
+    maha[maha == 0] += 1e-16
+    omega = ch.sqrt(maha / eps) - 1.
+    omega = omega[..., None]
+    # omega = ch.max(-omega, omega)[..., None]
+
+    proj_mean = (mean + omega * old_mean) / (1 + omega + 1e-16)
+
+    return proj_mean
+
+
 class BaseProjectionLayer(object):
 
     def __init__(self,
                  proj_type: str = "",
-                 mean_bound: float = 0.03,
-                 cov_bound: float = 1e-3,
+                 mean_bound: float = 0.0,
+                 cov_bound: float = 0.0,
                  trust_region_coeff: float = 0.0,
-                 scale_prec: bool = True,
+                 scale_prec: bool = False,
+                 mean_eq: bool = False,
 
                  entropy_schedule: Union[None, str] = None,
                  action_dim: Union[None, int] = None,
                  total_train_steps: Union[None, int] = None,
                  target_entropy: float = 0.0,
-                 temperature: float = 0.5,
+                 temperature: float = 0.0,
                  entropy_eq: bool = False,
                  entropy_first: bool = False,
 
                  do_regression: bool = False,
-                 regression_iters: int = 1000,
-                 regression_lr: int = 3e-4,
-                 optimizer_type_reg: str = "adam",
+                 regression_iters: int = 0,
+                 lr_regression: float = 0,
+                 optimizer_regression: str = "adam",
 
                  cpu: bool = True,
                  dtype: ch.dtype = ch.float32,
                  ):
 
         """
-        Base projection layer, which can be used to compute metrics for non-projection approaches.
+
         Args:
            proj_type: Which type of projection to use. None specifies no projection and uses the TRPO objective.
            mean_bound: projection bound for the step size w.r.t. mean
            cov_bound: projection bound for the step size w.r.t. covariance matrix
            trust_region_coeff: Coefficient for projection regularization loss term.
            scale_prec: If true used mahalanobis distance for projections instead of euclidean with Sigma_old^-1.
+           mean_eq: Equality constraint for the mean part
            entropy_schedule: Schedule type for entropy projection, one of 'linear', 'exp', None.
            action_dim: number of action dimensions to scale exp decay correctly.
            total_train_steps: total number of training steps to compute appropriate decay over time.
@@ -151,8 +162,8 @@ class BaseProjectionLayer(object):
            entropy_first: Project entropy before trust region.
            do_regression: Conduct additional regression steps after the the policy steps to match projection and policy.
            regression_iters: Number of regression steps.
-           regression_lr: Regression learning rate.
-           optimizer_type_reg: Optimizer for regression.
+           lr_regression: Regression learning rate.
+           optimizer_regression: Optimizer for regression.
            cpu: Compute on CPU only.
            dtype: Data type to use, either of float32 or float64. The later might be necessary for higher
                    dimensions in order to learn the full covariance.
@@ -162,13 +173,15 @@ class BaseProjectionLayer(object):
         self.proj_type = proj_type
         self.mean_bound = tensorize(mean_bound, cpu=cpu, dtype=dtype)
         self.cov_bound = tensorize(cov_bound, cpu=cpu, dtype=dtype)
+        self.mean_eq = mean_eq
         self.trust_region_coeff = trust_region_coeff
         self.scale_prec = scale_prec
 
         # projection utils
         assert (action_dim and total_train_steps) if entropy_schedule else True
-        self.entropy_proj = entropy_equality_projection if entropy_eq else entropy_inequality_projection
-        self.entropy_schedule = get_entropy_schedule(entropy_schedule, total_train_steps, dim=action_dim)
+        self._entropy_proj = entropy_equality_projection if entropy_eq else entropy_inequality_projection
+        self._entropy_schedule_type = entropy_schedule
+        self._entropy_schedule = get_entropy_schedule(entropy_schedule, total_train_steps, dim=action_dim)
         self.target_entropy = tensorize(target_entropy, cpu=cpu, dtype=dtype)
         self.entropy_first = entropy_first
         self.entropy_eq = entropy_eq
@@ -178,13 +191,13 @@ class BaseProjectionLayer(object):
         # regression
         self.do_regression = do_regression
         self.regression_iters = regression_iters
-        self.lr_reg = regression_lr
-        self.optimizer_type_reg = optimizer_type_reg
+        self.lr_reg = lr_regression
+        self.optimizer_type_reg = optimizer_regression
 
-    def __call__(self, policy, p: Tuple[ch.Tensor, ch.Tensor], q, step, *args, **kwargs):
-        # entropy_bound = self.policy.entropy(q) - self.target_entropy
-        entropy_bound = self.entropy_schedule(self.initial_entropy, self.target_entropy, self.temperature,
-                                              step) * p[0].new_ones(p[0].shape[0])
+    def __call__(self, policy, p: Tuple[ch.Tensor, ch.Tensor], q, step, **kwargs):
+        # entropy_bound = self.policy.entropy(q_values) - self.target_entropy
+        m = p[0]
+        entropy_bound = self.get_entropy_bound(step) * m.new_ones(m.shape[0])
         return self._projection(policy, p, q, self.mean_bound, self.cov_bound, entropy_bound, **kwargs)
 
     def _trust_region_projection(self, policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Tensor],
@@ -210,7 +223,7 @@ class BaseProjectionLayer(object):
         """
         Template method with hook _trust_region_projection() to encode specific functionality.
         (Optional) entropy projection is executed before or after as specified by entropy_first.
-        Do not override this. For Python >= 3.8 you can use the @final decorator to enforce not overwriting.
+        Do not override this. For Python >= 3.8 you can use the @final decorator to enforce it.
         Args:
             policy: policy instance
             p: current distribution
@@ -224,21 +237,21 @@ class BaseProjectionLayer(object):
             projected mean, projected std
         """
 
-        ####################################################################################################################
+        ################################################################################################################
         # entropy projection in the beginning
         if self.entropy_first:
-            p = self.entropy_proj(policy, p, beta)
+            p = self._entropy_proj(policy, p, beta)
 
-        ####################################################################################################################
+        ################################################################################################################
         # trust region projection for mean and cov bounds
         proj_mean, proj_std = self._trust_region_projection(policy, p, q, eps, eps_cov, **kwargs)
 
-        ####################################################################################################################
+        ################################################################################################################
         # entropy projection in the end
         if self.entropy_first:
             return proj_mean, proj_std
 
-        return self.entropy_proj(policy, (proj_mean, proj_std), beta)
+        return self._entropy_proj(policy, (proj_mean, proj_std), beta)
 
     @property
     def initial_entropy(self):
@@ -251,13 +264,9 @@ class BaseProjectionLayer(object):
 
     def trust_region_value(self, policy, p, q):
         """
-        Computes the KL divergence between two Gaussian distributions p and q.
-        Args:
-            policy: policy instance
-            p: current distribution
-            q: old distribution
+        Computes the KL divergence between two Gaussian distributions p and q_values.
         Returns:
-            Mean and covariance part of the trust region metric.
+            mean and covariance part of
         """
         return gaussian_kl(policy, p, q)
 
@@ -274,19 +283,37 @@ class BaseProjectionLayer(object):
             trust region loss
         """
         p_target = (proj_p[0].detach(), proj_p[1].detach())
+        # TODO mean_diff = self.policy.maha(p[0], proj_p[0], b_old_std)
+        # mean_diff, cov_diff = self.trust_region_value(policy, p_target, p)
         mean_diff, cov_diff = self.trust_region_value(policy, p, p_target)
 
-        delta_loss = (mean_diff + cov_diff if policy.contextual_std else mean_diff).mean()
+        # mean_diff /= self.mean_bound
+        # cov_diff /= self.cov_bound
+        #
+        # huber = ch.nn.HuberLoss('none')
+        # mean_diff = huber(mean_diff, ch.zeros_like(mean_diff))
+        # cov_diff = huber(cov_diff, ch.zeros_like(cov_diff))
+        #
+        # # trust_region_loss = (mean_diff + cov_diff if policy.contextual_std else mean_diff).mean()
+        # mean_diff = mean_diff.clamp(max=3)
+        # cov_diff = cov_diff.clamp(max=3)
 
-        return delta_loss * self.trust_region_coeff
+        # trust_region_loss = (mean_diff + cov_diff).mean()
+        trust_region_loss = \
+            (mean_diff + cov_diff * int(policy.contextual_std)).mean()
+        return trust_region_loss * self.trust_region_coeff
 
-    def compute_metrics(self, policy, p, q) -> dict:
+    def get_entropy_bound(self, step):
+        return self._entropy_schedule(self.initial_entropy, self.target_entropy, self.temperature, step)
+
+    def compute_metrics(self, policy, p, q, step=None, aggregate=True) -> dict:
         """
         Returns dict with constraint metrics.
         Args:
             policy: policy instance
             p: current distribution
             q: old distribution
+            step: Current poliy step (only required when logging the entropy constraint error)
 
         Returns:
             dict with constraint metrics
@@ -302,19 +329,40 @@ class BaseProjectionLayer(object):
             combined_constraint = mean_diff + cov_diff
             entropy_diff = entropy_old - entropy
 
-        return {'kl': kl.detach().mean(),
-                'constraint': combined_constraint.mean(),
-                'mean_constraint': mean_diff.mean(),
-                'cov_constraint': cov_diff.mean(),
-                'entropy': entropy.mean(),
-                'entropy_diff': entropy_diff.mean(),
-                'kl_max': kl.max(),
-                'constraint_max': combined_constraint.max(),
-                'mean_constraint_max': mean_diff.max(),
-                'cov_constraint_max': cov_diff.max(),
-                'entropy_max': entropy.max(),
-                'entropy_diff_max': entropy_diff.max()
-                }
+        if aggregate:
+            constraints_dict = OrderedDict(
+                kl=kl.mean(),
+                constraint=combined_constraint.mean(),
+                mean_constraint=mean_diff.mean(),
+                cov_constraint=cov_diff.mean(),
+                entropy=entropy.mean(),
+                entropy_diff=entropy_diff.mean(),
+                kl_max=kl.max(),
+                constraint_max=combined_constraint.max(),
+                mean_constraint_max=mean_diff.max(),
+                cov_constraint_max=cov_diff.max(),
+                entropy_max=entropy.max(),
+                entropy_diff_max=entropy_diff.max()
+            )
+        else:
+            constraints_dict = OrderedDict(
+                kl=kl,
+                constraint=combined_constraint,
+                mean_constraint=mean_diff,
+                cov_constraint=cov_diff,
+                entropy=entropy,
+                entropy_diff=entropy_diff,
+            )
+
+        if self.has_entropy_control:
+            assert step is not None
+            constraints_dict.update(OrderedDict(entropy_constraint=(entropy - self.get_entropy_bound(step)).mean()))
+
+        return constraints_dict
+
+    @property
+    def has_entropy_control(self):
+        return bool(self._entropy_schedule_type)
 
     def trust_region_regression(self, policy: AbstractGaussianPolicy, obs: ch.Tensor, q: Tuple[ch.Tensor, ch.Tensor],
                                 n_minibatches: int, global_steps: int):
@@ -323,7 +371,7 @@ class BaseProjectionLayer(object):
         The policy parameters are updated in-place.
         Args:
             policy: policy instance
-            obs: collected observations from trajectories
+            obs: collected observations from sampling
             q: old distributions
             n_minibatches: split the rollouts into n_minibatches.
             global_steps: current number of steps, required for projection

@@ -1,53 +1,37 @@
-#   Copyright (c) 2021 Robert Bosch GmbH
-#   Author: Fabian Otto
-#
-#   This program is free software: you can redistribute it and/or modify
-#   it under the terms of the GNU Affero General Public License as published
-#   by the Free Software Foundation, either version 3 of the License, or
-#   (at your option) any later version.
-#
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU Affero General Public License for more details.
-#
-#   You should have received a copy of the GNU Affero General Public License
-#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+from typing import Tuple
 
 import numpy as np
 import torch as ch
 import torch.nn as nn
-from typing import Tuple
 
 from trust_region_projections.models.policy.abstract_gaussian_policy import AbstractGaussianPolicy
 from trust_region_projections.utils.network_utils import initialize_weights
 
 
 class GaussianPolicyDiag(AbstractGaussianPolicy):
-
     """
-    A Gaussian policy using a fully connected neural network.
-    The parameterizing tensor is a mean and diagonal std vector.
+    A continuous policy using a fully connected neural network.
+    The parameterizing tensor is a mean and std vector, which parameterize a diagonal gaussian distribution.
     """
 
-    def _get_std_parameter(self, action_dim):
-        std = ch.normal(0, 0.01, (action_dim,))
+    def _get_std_parameter(self, action_dim, scale=0.01):
+        std = ch.normal(0, scale, (action_dim,))
         return nn.Parameter(std)
 
-    def _get_std_layer(self, prev_size, action_dim, init):
+    def _get_std_layer(self, prev_size, action_dim, init, gain=0.01, scale=1e-4):
         std = nn.Linear(prev_size, action_dim)
-        initialize_weights(std, init, scale=0.01)
+        initialize_weights(std, init, gain=gain, scale=scale)
         return std
 
-    def forward(self, x, train=True):
+    def forward(self, x: ch.Tensor, train=True):
         self.train(train)
 
         for affine in self._affine_layers:
-            x = self.activation(affine(x))
-
+            x = affine(x)
         std = self._pre_std(x) if self.contextual_std else self._pre_std
         std = (self.diag_activation(std + self._pre_activation_shift) + self.minimal_std)
-        std = std.diag_embed().expand(x.shape[0], -1, -1)
+        # std = std.clamp(max=STD_MAX)
+        std = std.diag_embed().expand(x.shape[:-1] + (-1, -1))
 
         return self._mean(x), std
 
@@ -57,7 +41,7 @@ class GaussianPolicyDiag(AbstractGaussianPolicy):
     def rsample(self, p: Tuple[ch.Tensor, ch.Tensor], n=1) -> ch.Tensor:
         means, std = p
         std = std.diagonal(dim1=-2, dim2=-1)
-        eps = ch.randn((n,) + means.shape).to(dtype=std.dtype, device=std.device)
+        eps = ch.randn((n,) + means.shape, dtype=std.dtype, device=std.device)
         samples = means + eps * std
         # squeeze when n == 1
         return samples.squeeze(0)
@@ -103,7 +87,10 @@ class GaussianPolicyDiag(AbstractGaussianPolicy):
 
     def set_std(self, std: ch.Tensor) -> None:
         assert not self.contextual_std
-        self._pre_std.data = self.diag_activation_inv(std.diagonal() - self.minimal_std) - self._pre_activation_shift
+        # avoid 0 for diagonal elements -->softplus^-1 fails
+        shifted_min = self.minimal_std + ch.finfo(std.dtype).eps
+        std_min = std.diagonal().clamp(min=shifted_min) - self.minimal_std
+        self._pre_std.data = self.diag_activation_inv(std_min) - self._pre_activation_shift
 
     @property
     def is_diag(self):

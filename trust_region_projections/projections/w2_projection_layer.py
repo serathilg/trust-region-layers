@@ -1,19 +1,3 @@
-#   Copyright (c) 2021 Robert Bosch GmbH
-#   Author: Fabian Otto
-#
-#   This program is free software: you can redistribute it and/or modify
-#   it under the terms of the GNU Affero General Public License as published
-#   by the Free Software Foundation, either version 3 of the License, or
-#   (at your option) any later version.
-#
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU Affero General Public License for more details.
-#
-#   You should have received a copy of the GNU Affero General Public License
-#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 import torch as ch
 from typing import Tuple
 
@@ -27,14 +11,14 @@ class WassersteinProjectionLayer(BaseProjectionLayer):
     def _trust_region_projection(self, policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Tensor],
                                  q: Tuple[ch.Tensor, ch.Tensor], eps: ch.Tensor, eps_cov: ch.Tensor, **kwargs):
         """
-        Runs commutative Wasserstein projection layer and constructs sqrt of covariance
+        runs wasserstein projection layer and constructs sqrt of covariance
         Args:
+            **kwargs:
             policy: policy instance
             p: current distribution
             q: old distribution
             eps: (modified) kl bound/ kl bound for mean part
             eps_cov: (modified) kl bound for cov part
-            **kwargs:
 
         Returns:
             mean, cov sqrt
@@ -51,6 +35,7 @@ class WassersteinProjectionLayer(BaseProjectionLayer):
 
         ####################################################################################################################
         # project mean (w/ or w/o precision scaling)
+
         proj_mean = mean_projection(mean, old_mean, mean_part, eps)
 
         ####################################################################################################################
@@ -73,12 +58,8 @@ class WassersteinProjectionLayer(BaseProjectionLayer):
 
     def trust_region_value(self, policy, p, q):
         """
-        Computes the Wasserstein distance between two Gaussian distributions p and q.
-        Args:
-            policy: policy instance
-            p: current distribution
-            q: old distribution
+        Computes the Wasserstein distance between two Gaussian distributions p and q_values.
         Returns:
-            mean and covariance part of Wasserstein distance
+            mean and covariance part
         """
         return gaussian_wasserstein_commutative(policy, p, q, scale_prec=self.scale_prec)

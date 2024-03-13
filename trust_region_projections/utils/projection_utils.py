@@ -1,25 +1,9 @@
-#   Copyright (c) 2021 Robert Bosch GmbH
-#   Author: Fabian Otto
-#
-#   This program is free software: you can redistribute it and/or modify
-#   it under the terms of the GNU Affero General Public License as published
-#   by the Free Software Foundation, either version 3 of the License, or
-#   (at your option) any later version.
-#
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU Affero General Public License for more details.
-#
-#   You should have received a copy of the GNU Affero General Public License
-#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 import numpy as np
 import torch as ch
 from typing import Tuple, Union
 
 from trust_region_projections.models.policy.abstract_gaussian_policy import AbstractGaussianPolicy
-from trust_region_projections.utils.torch_utils import torch_batched_trace
+from trust_region_projections.utils.torch_utils import torch_batched_trace, torch_batched_trace_square
 
 
 def mean_distance(policy, mean, mean_other, std_other=None, scale_prec=False):
@@ -66,15 +50,15 @@ def gaussian_kl(policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Tensor],
     mean_other, std_other = q
     k = mean.shape[-1]
 
+    maha_part = .5 * policy.maha(mean, mean_other, std_other)
+
     det_term = policy.log_determinant(std)
     det_term_other = policy.log_determinant(std_other)
 
-    cov = policy.covariance(std)
-    prec_other = policy.precision(std_other)
-
-    maha_part = .5 * policy.maha(mean, mean_other, std_other)
-    # trace_part = (var * precision_other).sum([-1, -2])
-    trace_part = torch_batched_trace(prec_other @ cov)
+    # cov = policy.covariance(std)
+    # prec_other = policy.precision(std_other)
+    # trace_part = torch_batched_trace(prec_other @ cov)
+    trace_part = torch_batched_trace_square(ch.linalg.solve_triangular(std_other, std, upper=False))
     cov_part = .5 * (trace_part - k + det_term_other - det_term)
 
     return maha_part, cov_part
@@ -84,11 +68,11 @@ def gaussian_frobenius(policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Te
                        scale_prec: bool = False, return_cov: bool = False) \
         -> Union[Tuple[ch.Tensor, ch.Tensor], Tuple[ch.Tensor, ch.Tensor, ch.Tensor, ch.Tensor]]:
     """
-    Compute (p - q) (L_oL_o^T)^-1 (p - 1)^T + |LL^T - L_oL_o^T|_F^2 with p,q ~ N(y, LL^T)
+    Compute (p - q_values) (L_oL_o^T)^-1 (p - 1)^T + |LL^T - L_oL_o^T|_F^2 with p,q_values ~ N(y, LL^T)
     Args:
         policy: current policy
         p: mean and chol of gaussian p
-        q: mean and chol of gaussian q
+        q: mean and chol of gaussian q_values
         return_cov: return cov matrices for further computations
         scale_prec: scale objective with precision matrix
 
@@ -116,14 +100,14 @@ def gaussian_frobenius(policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Te
 def gaussian_wasserstein_commutative(policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Tensor],
                                      q: Tuple[ch.Tensor, ch.Tensor], scale_prec=False) -> Tuple[ch.Tensor, ch.Tensor]:
     """
-    Compute mean part and cov part of W_2(p || q) with p,q ~ N(y, SS).
+    Compute mean part and cov part of W_2(p || q_values) with p,q_values ~ N(y, SS).
     This version DOES assume commutativity of both distributions, i.e. covariance matrices.
     This is less general and assumes both distributions are somewhat close together.
     When scale_prec is true scale both distributions with old precision matrix.
     Args:
         policy: current policy
         p: mean and sqrt of gaussian p
-        q: mean and sqrt of gaussian q
+        q: mean and sqrt of gaussian q_values
         scale_prec: scale objective by old precision matrix.
                     This penalizes directions based on old uncertainty/covariance.
 
@@ -141,7 +125,7 @@ def gaussian_wasserstein_commutative(policy: AbstractGaussianPolicy, p: Tuple[ch
         batch_dim, dim = mean.shape
 
         identity = ch.eye(dim, dtype=sqrt.dtype, device=sqrt.device)
-        sqrt_inv_other = ch.solve(identity, sqrt_other)[0]
+        sqrt_inv_other = ch.linalg.solve(sqrt_other, identity)
         c = sqrt_inv_other @ cov @ sqrt_inv_other
 
         cov_part = torch_batched_trace(identity + c - 2 * sqrt_inv_other @ sqrt)
@@ -159,14 +143,14 @@ def gaussian_wasserstein_non_commutative(policy: AbstractGaussianPolicy, p: Tupl
                                          return_eig=False) -> Union[Tuple[ch.Tensor, ch.Tensor],
                                                                     Tuple[ch.Tensor, ch.Tensor, ch.Tensor, ch.Tensor]]:
     """
-    Compute mean part and cov part of W_2(p || q) with p,q ~ N(y, SS)
+    Compute mean part and cov part of W_2(p || q_values) with p,q_values ~ N(y, SS)
     This version DOES NOT assume commutativity of both distributions, i.e. covariance matrices.
     This is more general an does not make any assumptions.
     When scale_prec is true scale both distributions with old precision matrix.
     Args:
         policy: current policy
         p: mean and sqrt of gaussian p
-        q: mean and sqrt of gaussian q
+        q: mean and sqrt of gaussian q_values
         scale_prec: scale objective by old precision matrix.
                     This penalizes directions based on old uncertainty/covariance.
         return_eig: return eigen decomp for further computation
@@ -186,7 +170,7 @@ def gaussian_wasserstein_non_commutative(policy: AbstractGaussianPolicy, p: Tupl
         # cov constraint scaled with precision of old dist
         # W2 objective for cov assuming normal W2 objective for mean
         identity = ch.eye(dim, dtype=sqrt.dtype, device=sqrt.device)
-        sqrt_inv_other = ch.solve(identity, sqrt_other)[0]
+        sqrt_inv_other = ch.linalg.solve(sqrt_other, identity)
         c = sqrt_inv_other @ cov @ sqrt_inv_other
 
         # compute inner parenthesis of trace in W2,
@@ -219,7 +203,7 @@ def constraint_values(proj_type, policy: AbstractGaussianPolicy, p: Tuple[ch.Ten
         proj_type: type of projection to compute the metrics for
         policy: current policy
         p: mean and std of gaussian p
-        q: mean and std of gaussian q
+        q: mean and std of gaussian q_values
         scale_prec: for W2 projection, use version scaled with precision matrix
 
     Returns: entropy, mean_part, cov_part, kl
@@ -260,8 +244,13 @@ def get_entropy_schedule(schedule_type, total_train_steps, dim):
     if schedule_type == "linear":
         return lambda initial_entropy, target_entropy, temperature, step: step * (
                 target_entropy - initial_entropy) / total_train_steps + initial_entropy
+    # if schedule_type == "linear_v2":
+    #     return lambda old_entropy, beta, step: old_entropy - beta
     elif schedule_type == "exp":
         return lambda initial_entropy, target_entropy, temperature, step: dim * target_entropy + (
                 initial_entropy - dim * target_entropy) * temperature ** (10 * step / total_train_steps)
+    # elif schedule_type == "exp_v2":
+    #     return lambda old_entropy, beta, step: old_entropy - (
+    #             - step / (total_train_step / temperature) + beta.log()).exp()
     else:
         return lambda initial_entropy, target_entropy, temperature, step: initial_entropy.new([-np.inf])
