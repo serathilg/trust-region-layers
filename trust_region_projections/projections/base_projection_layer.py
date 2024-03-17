@@ -8,6 +8,7 @@ from typing import Tuple, Union
 from trust_region_projections.models.policy.abstract_gaussian_policy import AbstractGaussianPolicy
 from trust_region_projections.utils.network_utils import get_optimizer
 from trust_region_projections.utils.projection_utils import gaussian_kl, get_entropy_schedule
+from trust_region_projections.utils.projection_utils import gaussian_kl_details
 from trust_region_projections.utils.torch_utils import generate_minibatches, select_batch, tensorize
 
 
@@ -271,7 +272,7 @@ class BaseProjectionLayer(object):
         return gaussian_kl(policy, p, q)
 
     def get_trust_region_loss(self, policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Tensor],
-                              proj_p: Tuple[ch.Tensor, ch.Tensor]):
+                              proj_p: Tuple[ch.Tensor, ch.Tensor], **kwargs):
         """
         Compute the trust region loss to ensure policy output and projection stay close.
         Args:
@@ -297,10 +298,11 @@ class BaseProjectionLayer(object):
         # # trust_region_loss = (mean_diff + cov_diff if policy.contextual_std else mean_diff).mean()
         # mean_diff = mean_diff.clamp(max=3)
         # cov_diff = cov_diff.clamp(max=3)
+        if not kwargs.get("set_variance", False):
+            trust_region_loss = (mean_diff + cov_diff).mean()
+        else:
+            trust_region_loss = (mean_diff + cov_diff * 0).mean()
 
-        # trust_region_loss = (mean_diff + cov_diff).mean()
-        trust_region_loss = \
-            (mean_diff + cov_diff * int(policy.contextual_std)).mean()
         return trust_region_loss * self.trust_region_coeff
 
     def get_entropy_bound(self, step):
@@ -324,7 +326,8 @@ class BaseProjectionLayer(object):
             mean_kl, cov_kl = gaussian_kl(policy, p, q)
             kl = mean_kl + cov_kl
 
-            mean_diff, cov_diff = self.trust_region_value(policy, p, q)
+            mean_diff, cov_diff, shape_diff, volume_diff = \
+                gaussian_kl_details(policy, p, q)
 
             combined_constraint = mean_diff + cov_diff
             entropy_diff = entropy_old - entropy
@@ -335,12 +338,16 @@ class BaseProjectionLayer(object):
                 constraint=combined_constraint.mean(),
                 mean_constraint=mean_diff.mean(),
                 cov_constraint=cov_diff.mean(),
+                shape_diff=shape_diff.mean(),
+                volume_diff=volume_diff.mean(),
                 entropy=entropy.mean(),
                 entropy_diff=entropy_diff.mean(),
                 kl_max=kl.max(),
                 constraint_max=combined_constraint.max(),
                 mean_constraint_max=mean_diff.max(),
                 cov_constraint_max=cov_diff.max(),
+                shape_diff_max=shape_diff.max(),
+                volume_diff_max=volume_diff.max(),
                 entropy_max=entropy.max(),
                 entropy_diff_max=entropy_diff.max()
             )

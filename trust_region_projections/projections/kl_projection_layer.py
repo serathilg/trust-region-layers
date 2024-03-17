@@ -8,7 +8,7 @@ from trust_region_projections.projections.base_projection_layer import BaseProje
 from trust_region_projections.utils.projection_utils import gaussian_kl
 from trust_region_projections.utils.torch_utils import get_numpy
 
-MAX_EVAL = 1000
+MAX_EVAL = 1000 # 30, 40, 50 for diag only, 5000-10000 for full cov maybe and more stabilities
 
 
 class KLProjectionLayer(BaseProjectionLayer):

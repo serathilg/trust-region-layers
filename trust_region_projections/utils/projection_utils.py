@@ -64,6 +64,41 @@ def gaussian_kl(policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Tensor],
     return maha_part, cov_part
 
 
+def gaussian_kl_details(policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Tensor],
+                q: Tuple[ch.Tensor, ch.Tensor]) ->\
+        Tuple[ch.Tensor, ch.Tensor, ch.Tensor, ch.Tensor]:
+    """
+    Get the expected KL divergence between two sets of Gaussians over states -
+    Calculates E KL(p||q): E[sum p(x) log(p(x)/q(x))] in closed form for Gaussians.
+
+    Args:
+        policy: policy instance
+        p: first distribution tuple (mean, var)
+        q: second distribution tuple (mean, var)
+
+    Returns:
+
+    """
+
+    mean, std = p # N_0
+    mean_other, std_other = q # N_1
+    k = mean.shape[-1]
+
+    maha_part = .5 * policy.maha(mean, mean_other, std_other)
+
+    det_term = policy.log_determinant(std)
+    det_term_other = policy.log_determinant(std_other)
+
+    # cov = policy.covariance(std)
+    # prec_other = policy.precision(std_other)
+    # trace_part = torch_batched_trace(prec_other @ cov)
+    trace_part = torch_batched_trace_square(ch.linalg.solve_triangular(std_other, std, upper=False))
+    cov_part = .5 * (trace_part - k + det_term_other - det_term)
+
+    return maha_part, cov_part, 0.5 * (trace_part-k), \
+           0.5 * (det_term_other - det_term)
+
+
 def gaussian_frobenius(policy: AbstractGaussianPolicy, p: Tuple[ch.Tensor, ch.Tensor], q: Tuple[ch.Tensor, ch.Tensor],
                        scale_prec: bool = False, return_cov: bool = False) \
         -> Union[Tuple[ch.Tensor, ch.Tensor], Tuple[ch.Tensor, ch.Tensor, ch.Tensor, ch.Tensor]]:
@@ -243,7 +278,7 @@ def get_entropy_schedule(schedule_type, total_train_steps, dim):
     """
     if schedule_type == "linear":
         return lambda initial_entropy, target_entropy, temperature, step: step * (
-                target_entropy - initial_entropy) / total_train_steps + initial_entropy
+                dim * target_entropy - initial_entropy) / total_train_steps + initial_entropy
     # if schedule_type == "linear_v2":
     #     return lambda old_entropy, beta, step: old_entropy - beta
     elif schedule_type == "exp":
