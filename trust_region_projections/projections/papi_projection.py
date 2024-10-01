@@ -101,7 +101,7 @@ class PAPIProjection(BaseProjectionLayer):
             maha_delta = eps if intermed_mean is None else (eps - mm)
             eta_rot = maha_delta / ch.max(maha_part + cov_part, ch.tensor(1e-16, dtype=dtype, device=device))
             new_cov = (1 - eta_rot) * old_cov + eta_rot * cov
-            proj_chol = ch.cholesky(new_cov)
+            proj_chol = ch.linalg.cholesky(new_cov)
 
             # recompute covariance part of KL for new chol
             trace_term = 0.5 * (torch_batched_trace(old_precision @ new_cov) - dim).mean()  # rotation difference

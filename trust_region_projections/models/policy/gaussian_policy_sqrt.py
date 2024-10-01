@@ -36,7 +36,7 @@ class GaussianPolicySqrt(GaussianPolicyFull):
             The log determinant of std, aka log sum the diagonal
 
         """
-        return 4 * ch.cholesky(std).diagonal(dim1=-2, dim2=-1).log().sum(-1)
+        return 4 * ch.linalg.cholesky(std).diagonal(dim1=-2, dim2=-1).log().sum(-1)
 
     def maha(self, mean, mean_other, std):
         diff = (mean - mean_other)[..., None]
@@ -53,7 +53,7 @@ class GaussianPolicySqrt(GaussianPolicyFull):
         return self.diag_activation_inv(ch.sqrt(init_std) - ch.sqrt(minimal_std))
 
     def set_std(self, std: ch.Tensor) -> None:
-        std = ch.cholesky(std, upper=False)
+        std = ch.linalg.cholesky(std)
         super(GaussianPolicySqrt, self).set_std(std)
 
     @property

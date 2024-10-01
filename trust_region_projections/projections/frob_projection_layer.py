@@ -49,7 +49,7 @@ class FrobeniusProjectionLayer(BaseProjectionLayer):
             eta = ch.max(-eta, eta)
 
             new_cov = (cov + ch.einsum('i,ijk->ijk', eta, cov_old)) / (1. + eta + 1e-16)[..., None, None]
-            proj_chol = ch.where(cov_mask[..., None, None], ch.cholesky(new_cov), chol)
+            proj_chol = ch.where(cov_mask[..., None, None], ch.linalg.cholesky(new_cov), chol)
         else:
             proj_chol = chol
 

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools >= 61", "setuptools_scm"]
+build-backend = 'setuptools.build_meta'
+
+[project]
+name = "trust_region_projections"
+version = "0.1.0"
+requires-python = ">= 3.10"
+dependencies = [
+  'torch>=2.3',
+  'numpy>=2.1',
+  'cppprojection',
+]
+
+
+[tool.setuptools.packages.find]
+include = ["trust_region_projections*"]
