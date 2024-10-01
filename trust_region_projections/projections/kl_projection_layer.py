@@ -82,7 +82,7 @@ class KLProjectionLayer(BaseProjectionLayer):
                     # check if any of the cholesky decompositions failed and keep old_std in that case
                     failed_mask = failed_mask.type(ch.bool)
                     if ch.any(failed_mask):
-                        proj_std[failed_mask] = old_std[failed_mask]
+                        proj_std[mask][failed_mask] = old_std[mask][failed_mask]
             except Exception as e:
                 # logging.error(e)
                 # import traceback
