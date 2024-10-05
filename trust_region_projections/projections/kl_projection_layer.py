@@ -1,7 +1,7 @@
 import cpp_projection
 import numpy as np
 import torch as ch
-from typing import Any, Tuple
+from typing import Any, Callable, Tuple, TypeVar
 
 from trust_region_projections.models.policy.abstract_gaussian_policy import AbstractGaussianPolicy
 from trust_region_projections.projections.base_projection_layer import BaseProjectionLayer, mean_projection
@@ -102,14 +102,17 @@ class KLProjectionLayer(BaseProjectionLayer):
 
 
 class KLProjectionGradFunctionCovOnly(ch.autograd.Function):
-    projection_op = None
+    projection_ops: dict[
+        tuple[int, int, int], cpp_projection.BatchedCovOnlyProjection
+    ] = {}
 
     @staticmethod
-    def get_projection_op(batch_shape, dim, max_eval=MAX_EVAL):
-        if not KLProjectionGradFunctionCovOnly.projection_op:
-            KLProjectionGradFunctionCovOnly.projection_op = \
-                cpp_projection.BatchedCovOnlyProjection(batch_shape, dim, max_eval=max_eval)
-        return KLProjectionGradFunctionCovOnly.projection_op
+    def get_projection_op(batch_shape: int, dim: int, max_eval: int = MAX_EVAL):
+        return _setdefault_pass_key(
+            KLProjectionGradFunctionCovOnly.projection_ops,
+            (batch_shape, dim, max_eval),
+            lambda param_tuple: cpp_projection.BatchedCovOnlyProjection(*param_tuple),
+        )
 
     @staticmethod
     def forward(ctx: Any, *args: Any, **kwargs: Any) -> Any:
@@ -149,14 +152,19 @@ class KLProjectionGradFunctionCovOnly(ch.autograd.Function):
 
 
 class KLProjectionGradFunctionDiagCovOnly(ch.autograd.Function):
-    projection_op = None
+    projection_ops: dict[
+        tuple[int, int, int], cpp_projection.BatchedDiagCovOnlyProjection
+    ] = {}
 
     @staticmethod
-    def get_projection_op(batch_shape, dim, max_eval=MAX_EVAL):
-        if not KLProjectionGradFunctionDiagCovOnly.projection_op:
-            KLProjectionGradFunctionDiagCovOnly.projection_op = \
-                cpp_projection.BatchedDiagCovOnlyProjection(batch_shape, dim, max_eval=max_eval)
-        return KLProjectionGradFunctionDiagCovOnly.projection_op
+    def get_projection_op(batch_shape: int, dim: int, max_eval: int = MAX_EVAL):
+        return _setdefault_pass_key(
+            KLProjectionGradFunctionDiagCovOnly.projection_ops,
+            (batch_shape, dim, max_eval),
+            lambda param_tuple: cpp_projection.BatchedDiagCovOnlyProjection(
+                *param_tuple
+            ),
+        )
 
     @staticmethod
     def forward(ctx: Any, *args: Any, **kwargs: Any) -> Any:
@@ -168,9 +176,6 @@ class KLProjectionGradFunctionDiagCovOnly(ch.autograd.Function):
         cov_np = get_numpy(cov)
         old_cov_np = get_numpy(old_cov_np)
         eps = get_numpy(eps_cov) * np.ones(batch_shape)
-
-        # p_op = cpp_projection.BatchedDiagCovOnlyProjection(batch_shape, dim)
-        # ctx.proj = projection_op
 
         p_op = KLProjectionGradFunctionDiagCovOnly.get_projection_op(batch_shape, dim)
         ctx.proj = p_op
@@ -193,14 +198,19 @@ class KLProjectionGradFunctionDiagCovOnly(ch.autograd.Function):
 
 
 class KLProjectionGradFunctionDiagSplit(ch.autograd.Function):
-    projection_op = None
+    projection_ops: dict[
+        tuple[int, int, int], cpp_projection.BatchedSplitDiagMoreProjection
+    ] = {}
 
     @staticmethod
-    def get_projection_op(batch_shape, dim: int, max_eval: int = MAX_EVAL):
-        if not KLProjectionGradFunctionDiagSplit.projection_op:
-            KLProjectionGradFunctionDiagSplit.projection_op = \
-                cpp_projection.BatchedSplitDiagMoreProjection(batch_shape, dim, max_eval=max_eval)
-        return KLProjectionGradFunctionDiagSplit.projection_op
+    def get_projection_op(batch_shape: int, dim: int, max_eval: int = MAX_EVAL):
+        return _setdefault_pass_key(
+            KLProjectionGradFunctionDiagSplit.projection_ops,
+            (batch_shape, dim, max_eval),
+            lambda param_tuple: cpp_projection.BatchedSplitDiagMoreProjection(
+                *param_tuple
+            ),
+        )
 
     @staticmethod
     def forward(ctx: Any, *args: Any, **kwargs: Any) -> Any:
@@ -215,7 +225,6 @@ class KLProjectionGradFunctionDiagSplit(ch.autograd.Function):
         eps_mu = eps_mu * np.ones(batch_shape)
         eps_sigma = eps_sigma * np.ones(batch_shape)
 
-        # p_op = cpp_projection.BatchedSplitDiagMoreProjection(batch_shape, dim, max_eval=100)
         p_op = KLProjectionGradFunctionDiagSplit.get_projection_op(batch_shape, dim)
 
         try:
@@ -242,15 +251,20 @@ class KLProjectionGradFunctionDiagSplit(ch.autograd.Function):
 
 
 class KLProjectionGradFunctionJoint(ch.autograd.Function):
-    projection_op = None
+    projection_ops: dict[tuple[int, int, int], cpp_projection.BatchedProjection] = {}
 
     @staticmethod
-    def get_projection_op(batch_shape, dim: int, max_eval: int = MAX_EVAL):
-        if not KLProjectionGradFunctionJoint.projection_op:
-            KLProjectionGradFunctionJoint.projection_op = \
-                cpp_projection.BatchedProjection(batch_shape, dim, eec=False, constrain_entropy=False,
-                                                 max_eval=max_eval)
-        return KLProjectionGradFunctionJoint.projection_op
+    def get_projection_op(batch_shape: int, dim: int, max_eval: int = MAX_EVAL):
+        return _setdefault_pass_key(
+            KLProjectionGradFunctionJoint.projection_ops,
+            (batch_shape, dim, max_eval),
+            lambda param_tuple: cpp_projection.BatchedProjection(
+                *param_tuple[0:2],
+                eec=False,
+                constrain_entropy=False,
+                max_eval=param_tuple[2],
+            ),
+        )
 
     @staticmethod
     def forward(ctx: Any, *args: Any, **kwargs: Any) -> Any:
@@ -265,9 +279,6 @@ class KLProjectionGradFunctionJoint(ch.autograd.Function):
         eps = eps * np.ones(batch_shape)
         beta = beta.detach().numpy() * np.ones(batch_shape)
 
-        # projection_op = cpp_projection.BatchedProjection(batch_shape, dim, eec=False, constrain_entropy=False)
-        # ctx.proj = projection_op
-
         p_op = KLProjectionGradFunctionJoint.get_projection_op(batch_shape, dim)
         ctx.proj = p_op
 
@@ -281,3 +292,32 @@ class KLProjectionGradFunctionJoint(ch.autograd.Function):
         d_means, d_covs = grad_outputs
         df_means, df_covs = projection_op.backward(d_means.detach().numpy(), d_covs.detach().numpy())
         return d_means.new(df_means), d_means.new(df_covs), None, None, None, None
+
+
+K = TypeVar("K")
+V = TypeVar("V")
+
+
+def _setdefault_pass_key(
+    dictionary: dict[K, V], key: K, default_factory: Callable[[K], V]
+) -> V:
+    """Get item for key from dict if it exists, otherwise create item from factory which
+    takes key as argument, insert into dictionary and return new value.
+
+    setdefault but with a default function that takes the missing key.
+
+    Args:
+        dictionary (dict[K, V]): dictionary to retrieve from and insert
+        key (K): possibly missing key
+        default_factory (Callable[[K], V]): function to create new value if missing.
+
+    Returns:
+        V: existing value for key or new created and inserted value.
+    """
+    val_in_dict = dictionary.get(key, None)
+    if val_in_dict is None:
+        new_value = default_factory(key)
+        dictionary[key] = new_value
+        return new_value
+    else:
+        return val_in_dict
