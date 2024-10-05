@@ -70,15 +70,20 @@ class KLProjectionLayer(BaseProjectionLayer):
                 proj_std = ch.zeros_like(std)
                 proj_std[~mask] = std[~mask]
                 if mask.any():
-                    proj_cov = KLProjectionGradFunctionCovOnly.apply(cov, std.detach(), old_std, eps_cov)
+                    proj_cov = KLProjectionGradFunctionCovOnly.apply(
+                        cov[mask], std.detach()[mask], old_std[mask], eps_cov
+                    )
 
                     # needs projection and projection failed
                     # mean propagates the nan values to the batch dimensions, in case any of entries is nan
-                    is_nan = proj_cov.mean([-2, -1]).isnan() * mask
+                    is_nan = proj_cov.mean([-2, -1]).isnan()
                     if is_nan.any():
                         proj_std[is_nan] = old_std[is_nan]
-                        mask *= ~is_nan
-                    proj_std[mask], failed_mask = ch.linalg.cholesky_ex(proj_cov[mask])
+                        # set mask to false where projection is nan
+                        mask[mask] *= ~is_nan
+                    proj_std[mask], failed_mask = ch.linalg.cholesky_ex(
+                        proj_cov[~is_nan]
+                    )
                     # check if any of the cholesky decompositions failed and keep old_std in that case
                     failed_mask = failed_mask.type(ch.bool)
                     if ch.any(failed_mask):
