@@ -78,16 +78,24 @@ class KLProjectionLayer(BaseProjectionLayer):
                     # mean propagates the nan values to the batch dimensions, in case any of entries is nan
                     is_nan = proj_cov.mean([-2, -1]).isnan()
                     if is_nan.any():
-                        proj_std[is_nan] = old_std[is_nan]
+                        # copy old_std where cov violation and projection is NaN
+                        cov_mask_and_nan = mask.clone()
+                        cov_mask_and_nan[mask] *= is_nan
+                        proj_std[cov_mask_and_nan] = old_std[cov_mask_and_nan]
                         # set mask to false where projection is nan
-                        mask[mask] *= ~is_nan
+                        cov_mask_not_nan = mask.clone()
+                        cov_mask_not_nan[mask] *= ~is_nan
+                        mask = cov_mask_not_nan
+                    # cholesky of only the cov-violating non-NaN projected covs
                     proj_std[mask], failed_mask = ch.linalg.cholesky_ex(
                         proj_cov[~is_nan]
                     )
                     # check if any of the cholesky decompositions failed and keep old_std in that case
                     failed_mask = failed_mask.type(ch.bool)
                     if ch.any(failed_mask):
-                        proj_std[mask][failed_mask] = old_std[mask][failed_mask]
+                        cholesky_failed = mask.clone()
+                        cholesky_failed[mask] *= failed_mask
+                        proj_std[cholesky_failed] = old_std[cholesky_failed]
             except Exception as e:
                 # logging.error(e)
                 # import traceback
