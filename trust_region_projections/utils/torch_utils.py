@@ -7,7 +7,6 @@ import collections
 import numpy as np
 import torch as ch
 
-from utils.utils import get_free_gpus
 
 
 def sqrtm_newton(x: ch.Tensor, **kwargs: Any):
@@ -486,14 +485,3 @@ def get_stats_dict(d: dict):
         out.update(get_stats(v, k))
     return out
 
-
-def try_set_gpu_device(params: dict):
-    if not params['cpu']:
-        avail_gpus = get_free_gpus()[0]
-        if avail_gpus:
-            ch.cuda.set_device(avail_gpus)
-            logging.info(f"Currently used GPUs: {ch.cuda.current_device()}")
-        else:
-            logging.warning("No GPU available, running on CPU.")
-            os.environ["CUDA_VISIBLE_DEVICES"] = ""
-            params['cpu'] = True
