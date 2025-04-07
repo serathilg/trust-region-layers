@@ -69,10 +69,7 @@ def torch_batched_trace_square(x):
     Returns: trace with shape [a,...l]
 
     """
-    n = x.size(-1)
-    m = x.size(-2)
-    flat_trace = x.reshape(-1, m * n).square().sum(-1)
-    return flat_trace.reshape(x.shape[:-2])
+    return x.square().sum(dim=(-1,-2))
 
 
 def tensorize(x, cpu=True, dtype=ch.float32):
