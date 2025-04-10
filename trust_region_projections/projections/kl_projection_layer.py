@@ -71,8 +71,8 @@ class KLProjectionLayer(BaseProjectionLayer):
                 proj_std[~mask] = std[~mask]
                 if mask.any():
                     proj_cov = KLProjectionGradFunctionCovOnly.apply(
-                        cov[mask], std.detach()[mask], old_std[mask], eps_cov
-                    )
+                        cov, std.detach(), old_std, eps_cov
+                    )[mask]
 
                     # needs projection and projection failed
                     # mean propagates the nan values to the batch dimensions, in case any of entries is nan
